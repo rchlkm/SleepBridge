@@ -6,14 +6,17 @@ import HealthKit
 /// automation triggers via SyncSleepDataIntent, and also what "Sync Now"
 /// on the main screen calls.
 enum SyncRunner {
+    /// App-private storage for the last successful sync checkpoint and human-readable log.
     private static var stateDir: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
+    // The checkpoint controls incremental fetching; the log makes scheduled runs inspectable.
     private static var checkpointPath: String { stateDir.appendingPathComponent("checkpoint.txt").path }
     private static var logPath: String { stateDir.appendingPathComponent("run.log").path }
 
+    /// Appends a timestamped entry both to Xcode's console and the persistent local log.
     static func log(_ message: String) {
         let timestamp = ISO8601DateFormatter().string(from: Date())
         let line = "[\(timestamp)] \(message)\n"
@@ -31,10 +34,12 @@ enum SyncRunner {
         }
     }
 
+    /// Returns the entire persisted run log for display on the main screen.
     static func recentLog() -> String {
         (try? String(contentsOfFile: logPath, encoding: .utf8)) ?? "(no runs yet)"
     }
 
+    /// Starts from the prior successful endpoint, or the past 24 hours on first run.
     private static func readCheckpoint() -> Date {
         if let text = try? String(contentsOfFile: checkpointPath, encoding: .utf8),
            let date = ISO8601DateFormatter().date(from: text.trimmingCharacters(in: .whitespacesAndNewlines)) {
@@ -43,6 +48,7 @@ enum SyncRunner {
         return Date().addingTimeInterval(-24 * 60 * 60)
     }
 
+    /// Advances the checkpoint only after every pipeline stage has completed successfully.
     private static func writeCheckpoint(_ date: Date) {
         let text = ISO8601DateFormatter().string(from: date)
         try? text.write(toFile: checkpointPath, atomically: true, encoding: .utf8)
@@ -77,6 +83,7 @@ enum SyncRunner {
             log("Stage 5/5: saving")
             let written = try await SleepPipeline.save(toWrite)
 
+            // Advance only to the latest formatted interval, so the next run remains incremental.
             let latestEnd = formatted.map(\.end).max() ?? since
             writeCheckpoint(latestEnd)
 

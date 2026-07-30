@@ -1,5 +1,6 @@
 import AppIntents
 
+/// Shortcuts/Siri entry point for the same complete sync the main screen runs.
 struct SyncSleepDataIntent: AppIntent {
     static var title: LocalizedStringResource = "Sync Sleep Data"
     static var description = IntentDescription(
@@ -10,6 +11,7 @@ struct SyncSleepDataIntent: AppIntent {
     static var openAppWhenRun: Bool = false
 
     func perform() async throws -> some IntentResult & ReturnsValue<String> {
+        // Return the summary so a Shortcut can display the outcome to the user.
         let summary = await SyncRunner.run()
         return .result(value: summary)
     }

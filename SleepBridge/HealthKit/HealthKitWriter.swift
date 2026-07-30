@@ -1,9 +1,13 @@
 import HealthKit
 
+/// Errors the small HealthKit wrapper can report before a query or write begins.
 enum HealthKitWriterError: Error {
     case notAvailable
 }
 
+/// Centralizes HealthKit permission requests, reads, writes, and deletion for
+/// sleep-analysis samples. Keeping the framework calls here lets the pipeline
+/// remain focused on transforming data.
 final class HealthKitWriter {
     private let store = HKHealthStore()
 
@@ -14,9 +18,11 @@ final class HealthKitWriter {
         guard let sleepType = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) else {
             throw HealthKitWriterError.notAvailable
         }
+        // Requesting both access modes supports duplicate detection and writing new samples.
         try await store.requestAuthorization(toShare: [sleepType], read: [sleepType])
     }
 
+    /// Saves a single HealthKit category sample for one sleep interval.
     func writeSample(start: Date, end: Date, value: HKCategoryValueSleepAnalysis) async throws {
         guard let sleepType = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) else {
             throw HealthKitWriterError.notAvailable
@@ -39,6 +45,7 @@ final class HealthKitWriter {
         }
         let predicate = HKQuery.predicateForSamples(withStart: start, end: end, options: [])
 
+        // HKSampleQuery is callback-based; bridge it to async/await for callers.
         return try await withCheckedThrowingContinuation { continuation in
             let query = HKSampleQuery(
                 sampleType: sleepType,

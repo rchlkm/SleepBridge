@@ -1,5 +1,8 @@
 import SwiftUI
 
+/// Developer-only screen for exercising each external dependency and each
+/// pipeline stage independently. It is intentionally separate from the normal
+/// one-tap sync path used by the app and Shortcuts.
 struct DiagnosticsView: View {
     // Smoke tests
     @State private var authResult = ""
@@ -102,6 +105,7 @@ struct DiagnosticsView: View {
         monospace: Bool = false,
         action: @escaping () async -> Void
     ) -> some View {
+        // Each button owns its busy state so an in-flight operation cannot be started twice.
         VStack(alignment: .leading, spacing: 4) {
             Button(isBusy ? "Running…" : title) {
                 Task { await action() }

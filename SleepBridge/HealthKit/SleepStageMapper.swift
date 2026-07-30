@@ -1,5 +1,7 @@
 import HealthKit
 
+/// The single source of truth for translating Google Fit sleep-stage values
+/// into the closest supported HealthKit categories.
 enum SleepStageMapper {
 
     /// Google Fit com.google.sleep.segment intVal reference:

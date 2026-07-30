@@ -1,32 +1,38 @@
 import Foundation
 import HealthKit
 
+/// The raw Google session and every stage point fetched for that session.
 struct SessionWithPoints {
     let session: SleepSession
     let points: [SleepSegmentPoint]
 }
 
+/// Output of the fetch stage, preserving the requested time window for diagnostics.
 struct RawFetchResult {
     let sessions: [SessionWithPoints]
     let rangeStart: Date
     let rangeEnd: Date
 }
 
+/// A contiguous run of one raw Google Fit stage value.
 struct MergedSleepStage {
     let intVal: Int
     let start: Date
     let end: Date
 }
 
+/// One session after its minute-level points have been collapsed into runs.
 struct MergedSession {
     let session: SleepSession
     let stages: [MergedSleepStage]
 }
 
+/// Output of the merge stage.
 struct MergedFetchResult {
     let sessions: [MergedSession]
 }
 
+/// A write-ready HealthKit sleep category sample, plus its source value for debugging.
 struct FormattedSample {
     let start: Date
     let end: Date
@@ -44,6 +50,8 @@ enum SleepPipeline {
         let sessions = try await client.listSleepSessions(since: since, until: until)
 
         var sessionsWithPoints: [SessionWithPoints] = []
+        // The aggregate endpoint accepts one session interval at a time, so preserve the
+        // association between each session and its returned minute-level points.
         for session in sessions {
             let points = try await client.aggregateSleepSegments(
                 startTimeMillis: session.startTimeMillis,
@@ -84,9 +92,11 @@ enum SleepPipeline {
         for item in merged.sessions {
             let sessionStart = Date(timeIntervalSince1970: Double(item.session.startTimeMillis) / 1000)
             let sessionEnd = Date(timeIntervalSince1970: Double(item.session.endTimeMillis) / 1000)
+            // HealthKit benefits from an overall in-bed envelope; Google Fit does not emit one.
             samples.append(FormattedSample(start: sessionStart, end: sessionEnd, stage: .inBed, sourceIntVal: nil))
 
             for stage in item.stages {
+                // Unsupported Google values (such as out-of-bed) are deliberately omitted.
                 guard let mapped = SleepStageMapper.map(stage.intVal) else { continue }
                 samples.append(FormattedSample(start: stage.start, end: stage.end, stage: mapped, sourceIntVal: stage.intVal))
             }
@@ -109,6 +119,8 @@ enum SleepPipeline {
         var toWrite: [FormattedSample] = []
         var skipped = 0
         for sample in samples {
+            // Equality is intentionally exact: an overlapping sample may represent a distinct
+            // sleep stage and must not prevent this sample from being saved.
             let alreadyExists = existing.contains { e in
                 e.startDate == sample.start && e.endDate == sample.end && e.value == sample.stage.rawValue
             }

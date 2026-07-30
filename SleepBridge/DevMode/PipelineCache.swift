@@ -22,11 +22,13 @@ enum PipelineCache {
     static var dedupedAt: Date?
 
     static func isFresh(_ date: Date?) -> Bool {
+        // A missing timestamp is never valid; every cached stage must record when it ran.
         guard let date else { return false }
         return Date().timeIntervalSince(date) < maxAge
     }
 
     static func clear() {
+        // Clear the entire chain after a write so later diagnostics must start from fresh input.
         rawResult = nil
         rawFetchedAt = nil
         mergedResult = nil

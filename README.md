@@ -8,6 +8,24 @@ them into Apple HealthKit's sleep format, and writes them into Apple Health.
 It runs on a schedule via a Shortcuts automation — no manual app-opening
 required day to day.
 
+## Development note
+
+I used AI-assisted tools to accelerate early scaffolding, implementation
+exploration, and documentation. I directed the architecture and integrations,
+reviewed and revised the resulting work, and remain responsible for the code
+and project decisions in this repository.
+
+## Disclaimer
+
+SleepBridge is an experimental personal project and is provided “as is,” without warranties of any kind.
+
+It is not a medical device and does not provide medical advice, diagnosis, or treatment. Do not use its sleep data or recommendations as a substitute for advice from a qualified healthcare professional.
+
+SleepBridge may access health-related data only with the permissions you grant. You are responsible for reviewing the app’s privacy practices and for protecting any accounts, credentials, or exported data used with the app.
+
+This project is not affiliated with or endorsed by Apple, HealthKit, Google, or any connected service.
+
+
 ## How it works
 
 ```

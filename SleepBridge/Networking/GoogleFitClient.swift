@@ -1,23 +1,28 @@
 import Foundation
 
+/// One time-bounded sleep-stage point returned by Google Fit's aggregate endpoint.
 struct SleepSegmentPoint {
     let start: Date
     let end: Date
     let intVal: Int
 }
 
+/// A Google Fit session filtered to the sleep activity type.
 struct SleepSession {
     let startTimeMillis: Int64
     let endTimeMillis: Int64
     let activityType: Int
 }
 
+/// Failures specific to the Google OAuth and Fitness API boundary.
 enum GoogleFitError: Error {
     case missingCredentials
     case badResponse(String)
     case decodeFailed
 }
 
+/// Lightweight client for the two Google Fit calls needed by the pipeline:
+/// list sleep sessions, then fetch detailed stage points for each session.
 final class GoogleFitClient {
     private var cachedAccessToken: String?
     private var cachedTokenExpiry: Date?
@@ -33,6 +38,8 @@ final class GoogleFitClient {
         return (clientId, clientSecret, refreshToken)
     }
 
+    /// Exchanges the saved refresh token for a short-lived access token and
+    /// reuses it until one minute before Google reports it will expire.
     func accessToken() async throws -> String {
         if let token = cachedAccessToken, let expiry = cachedTokenExpiry, expiry > Date() {
             return token
@@ -43,6 +50,7 @@ final class GoogleFitClient {
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
+        // OAuth's refresh-token grant is form-encoded, unlike the JSON Fitness requests below.
         let bodyParams = [
             "client_id": creds.clientId,
             "client_secret": creds.clientSecret,
@@ -65,10 +73,12 @@ final class GoogleFitClient {
         }
         let decoded = try JSONDecoder().decode(TokenResponse.self, from: data)
         cachedAccessToken = decoded.access_token
+        // Reserve a one-minute buffer so a request does not begin with an expired token.
         cachedTokenExpiry = Date().addingTimeInterval(TimeInterval(decoded.expires_in - 60))
         return decoded.access_token
     }
 
+    /// Returns only sessions marked by Google Fit as activity type 72 (sleep).
     func listSleepSessions(since: Date, until: Date = Date()) async throws -> [SleepSession] {
         let token = try await accessToken()
         var components = URLComponents(string: "https://www.googleapis.com/fitness/v1/users/me/sessions")!
@@ -102,6 +112,8 @@ final class GoogleFitClient {
             }
     }
 
+    /// Fetches the detailed `com.google.sleep.segment` values for one session.
+    /// Google returns nanosecond timestamps here, unlike the millisecond session API.
     func aggregateSleepSegments(startTimeMillis: Int64, endTimeMillis: Int64) async throws -> [SleepSegmentPoint] {
         let token = try await accessToken()
         let url = URL(string: "https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate")!
@@ -131,6 +143,8 @@ final class GoogleFitClient {
         }
 
         var points: [SleepSegmentPoint] = []
+        // Aggregate responses are nested bucket → dataset → point. Ignore any malformed entries
+        // instead of failing a whole sync because one point cannot be decoded.
         for bucket in buckets {
             guard let datasets = bucket["dataset"] as? [[String: Any]] else { continue }
             for ds in datasets {
@@ -154,6 +168,7 @@ final class GoogleFitClient {
         return points
     }
 
+    /// Google expects ISO-8601 timestamps for the session-list query parameters.
     private func iso8601(_ date: Date) -> String {
         let formatter = ISO8601DateFormatter()
         return formatter.string(from: date)
