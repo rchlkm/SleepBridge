@@ -1,0 +1,30 @@
+# Xcode user state and build output
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+DerivedData/
+build/
+*.moved-aside
+*.ipa
+*.dSYM
+*.dSYM.zip
+
+# Swift Package Manager
+.build/
+.swiftpm/configuration/registries.json
+.netrc
+
+# macOS
+.DS_Store
+
+# Local secrets / test configuration
+config.json
+secrets.json
+*.env
+.env.*
+*-credentials.json
+*-refresh-token.txt
+
+# Committable example configuration
+!config.example.json
