@@ -1,10 +1,9 @@
 import Foundation
 import HealthKit
 
-/// The fully-automatic path — runs all four SleepPipeline stages in sequence
-/// with no pausing for review, no cache needed. This is what the Shortcuts
-/// automation triggers via SyncSleepDataIntent, and also what "Sync Now"
-/// on the main screen calls.
+/// The fully-automatic path — calls SleepPipeline.runAll() with no pausing for
+/// review. This is what the Shortcuts automation triggers via
+/// SyncSleepDataIntent, and also what "Sync Now" on the main screen calls.
 enum SyncRunner {
     /// App-private storage for the last successful sync checkpoint and human-readable log.
     private static var stateDir: URL {
@@ -33,12 +32,10 @@ enum SyncRunner {
             }
         }
     }
-
     /// Returns the entire persisted run log for display on the main screen.
     static func recentLog() -> String {
         (try? String(contentsOfFile: logPath, encoding: .utf8)) ?? "(no runs yet)"
     }
-
     /// Starts from the prior successful endpoint, or the past 24 hours on first run.
     private static func readCheckpoint() -> Date {
         if let text = try? String(contentsOfFile: checkpointPath, encoding: .utf8),
@@ -47,7 +44,6 @@ enum SyncRunner {
         }
         return Date().addingTimeInterval(-24 * 60 * 60)
     }
-
     /// Advances the checkpoint only after every pipeline stage has completed successfully.
     private static func writeCheckpoint(_ date: Date) {
         let text = ISO8601DateFormatter().string(from: date)
@@ -61,33 +57,20 @@ enum SyncRunner {
 
             guard CredentialStore.hasAllCredentials() else {
                 log("ERROR: Google credentials not set up yet.")
-                return "Missing credentials — open the app once to set up."
+                return "Missing credentials — open Settings to set up."
             }
 
             let since = readCheckpoint()
+            log("Running full pipeline since \(since)")
             log("Stage 1/5: fetching since \(since)")
-            let raw = try await SleepPipeline.fetchRaw(since: since)
-            log("  found \(raw.sessions.count) session(s)")
 
-            log("Stage 2/5: merging per-minute points into runs")
-            let merged = SleepPipeline.mergeStages(raw)
+            let result = try await SleepPipeline.runAll(since: since)
 
-            log("Stage 3/5: formatting")
-            let formatted = SleepPipeline.format(merged)
-            log("  \(formatted.count) sample(s) formatted")
+            if let latestEnd = result.latestEnd {
+                writeCheckpoint(latestEnd)
+            }
 
-            log("Stage 4/5: checking for duplicates")
-            let (toWrite, skipped) = try await SleepPipeline.dedupe(formatted)
-            log("  \(toWrite.count) new, \(skipped) already existed")
-
-            log("Stage 5/5: saving")
-            let written = try await SleepPipeline.save(toWrite)
-
-            // Advance only to the latest formatted interval, so the next run remains incremental.
-            let latestEnd = formatted.map(\.end).max() ?? since
-            writeCheckpoint(latestEnd)
-
-            let summary = "Wrote \(written) new sample(s), skipped \(skipped) duplicate(s). Checkpoint advanced to \(latestEnd)"
+            let summary = "Wrote \(result.written) new sample(s), skipped \(result.skipped) duplicate(s)."
             log("Done. \(summary)")
             return summary
         } catch {

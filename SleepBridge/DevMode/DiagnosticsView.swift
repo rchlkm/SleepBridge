@@ -12,9 +12,11 @@ struct DiagnosticsView: View {
     @State private var isBusyWriteTest = false
     @State private var isBusyDeleteTest = false
 
+    // Date range (calendar days only — noon-to-noon applied by default =)
+    @State private var rangeStartDay = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+    @State private var rangeEndDay = Date()
+
     // Step-by-step pipeline
-    @State private var rangeStart = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
-    @State private var rangeEnd = Date()
     @State private var fetchResult = ""
     @State private var mergeResult = ""
     @State private var formatResult = ""
@@ -25,6 +27,16 @@ struct DiagnosticsView: View {
     @State private var isBusyFormat = false
     @State private var isBusyDedupe = false
     @State private var isBusySave = false
+
+    // Run all at once
+    @State private var runAllResult = ""
+    @State private var isBusyRunAll = false
+
+    // Backup export
+    @State private var exportResult = ""
+    @State private var exportFileURL: URL?
+    @State private var isBusyExport = false
+    @State private var showShareSheet = false
 
     var body: some View {
         Form {
@@ -47,17 +59,39 @@ struct DiagnosticsView: View {
             }
 
             Section("Pick a date range") {
-                DatePicker("Start", selection: $rangeStart)
-                DatePicker("End", selection: $rangeEnd)
-                Text("Cached results between steps expire after 30 minutes.")
+                DateRangeCalendarView(startDay: $rangeStartDay, endDay: $rangeEndDay)
+                Text("Times aren't shown — noon to noon is used under the hood so each window lines up with one night's sleep.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+            }
+
+            Section("Backup — export raw data before it's gone") {
+                actionRow("Export Raw Data", isBusy: isBusyExport, result: exportResult) {
+                    isBusyExport = true
+                    let (message, url) = await DiagnosticsRunner.exportRawData(since: effectiveRange.start, until: effectiveRange.end)
+                    exportResult = message
+                    exportFileURL = url
+                    isBusyExport = false
+                }
+                if exportFileURL != nil {
+                    Button("Share / Save File") {
+                        showShareSheet = true
+                    }
+                }
+            }
+
+            Section("Run all steps at once (writes to Apple Health)") {
+                actionRow("Run All Steps", isBusy: isBusyRunAll, result: runAllResult, monospace: true) {
+                    isBusyRunAll = true
+                    runAllResult = await DiagnosticsRunner.runAllSteps(since: effectiveRange.start, until: effectiveRange.end)
+                    isBusyRunAll = false
+                }
             }
 
             Section("Step 1: Fetch raw Google Fit data") {
                 actionRow("Fetch Raw", isBusy: isBusyFetch, result: fetchResult, monospace: true) {
                     isBusyFetch = true
-                    fetchResult = await DiagnosticsRunner.fetchRaw(since: rangeStart, until: rangeEnd)
+                    fetchResult = await DiagnosticsRunner.fetchRaw(since: effectiveRange.start, until: effectiveRange.end)
                     isBusyFetch = false
                 }
             }
@@ -95,6 +129,21 @@ struct DiagnosticsView: View {
             }
         }
         .navigationTitle("Diagnostics")
+        .sheet(isPresented: $showShareSheet) {
+            if let url = exportFileURL {
+                ShareSheet(items: [url])
+            }
+        }
+    }
+
+    /// Converts the calendar-day-only picker selection into an actual noon-to-noon
+    /// Date range — a night of sleep straddles midnight, so noon-to-noon lines up
+    /// with "one night" better than midnight-to-midnight would.
+    private var effectiveRange: (start: Date, end: Date) {
+        let calendar = Calendar.current
+        let start = calendar.date(bySettingHour: 12, minute: 0, second: 0, of: rangeStartDay) ?? rangeStartDay
+        let end = calendar.date(bySettingHour: 12, minute: 0, second: 0, of: rangeEndDay) ?? rangeEndDay
+        return (start, end)
     }
 
     @ViewBuilder
@@ -105,7 +154,6 @@ struct DiagnosticsView: View {
         monospace: Bool = false,
         action: @escaping () async -> Void
     ) -> some View {
-        // Each button owns its busy state so an in-flight operation cannot be started twice.
         VStack(alignment: .leading, spacing: 4) {
             Button(isBusy ? "Running…" : title) {
                 Task { await action() }
