@@ -1,10 +1,15 @@
 import SwiftUI
 
-/// Developer-only screen for exercising each external dependency and each
-/// pipeline stage independently. It is intentionally separate from the normal
-/// one-tap sync path used by the app and Shortcuts.
+private enum DiagnosticsMode: String, CaseIterable, Identifiable {
+    case runAll = "Run All"
+    case stepByStep = "Step by Step"
+    var id: String { rawValue }
+}
+
 struct DiagnosticsView: View {
-    // Smoke tests
+    @State private var mode: DiagnosticsMode = .runAll
+
+    // Quick checks
     @State private var authResult = ""
     @State private var writeTestResult = ""
     @State private var deleteTestResult = ""
@@ -12,7 +17,7 @@ struct DiagnosticsView: View {
     @State private var isBusyWriteTest = false
     @State private var isBusyDeleteTest = false
 
-    // Date range (calendar days only — noon-to-noon applied by default =)
+    // Date range (calendar days only — noon-to-noon applied under the hood)
     @State private var rangeStartDay = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
     @State private var rangeEndDay = Date()
 
@@ -40,7 +45,15 @@ struct DiagnosticsView: View {
 
     var body: some View {
         Form {
-            Section("Quick smoke tests") {
+            Section {
+                Text("Quick checks that one narrow piece works, independent of the full pipeline below.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Quick Checks")
+            }
+
+            Section {
                 actionRow("Test Google Auth", isBusy: isBusyAuth, result: authResult) {
                     isBusyAuth = true
                     authResult = await DiagnosticsRunner.testGoogleAuth()
@@ -58,14 +71,14 @@ struct DiagnosticsView: View {
                 }
             }
 
-            Section("Pick a date range") {
+            Section("Date range") {
                 DateRangeCalendarView(startDay: $rangeStartDay, endDay: $rangeEndDay)
-                Text("Times aren't shown — noon to noon is used under the hood so each window lines up with one night's sleep.")
+                Text("Times aren't shown — noon to noon is used under the hood so each window lines up with one night's sleep. Future dates are disabled.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
 
-            Section("Backup — export raw data before it's gone") {
+            Section {
                 actionRow("Export Raw Data", isBusy: isBusyExport, result: exportResult) {
                     isBusyExport = true
                     let (message, url) = await DiagnosticsRunner.exportRawData(since: effectiveRange.start, until: effectiveRange.end)
@@ -78,53 +91,69 @@ struct DiagnosticsView: View {
                         showShareSheet = true
                     }
                 }
+            } header: {
+                Label("Backup", systemImage: "externaldrive.badge.icloud")
+            } footer: {
+                Text("Saves everything Google Fit has for the selected range to a file you keep yourself — a safety net in case Google shuts the API off before you've synced it all.")
             }
+            .listRowBackground(Color.orange.opacity(0.12))
 
-            Section("Run all steps at once (writes to Apple Health)") {
-                actionRow("Run All Steps", isBusy: isBusyRunAll, result: runAllResult, monospace: true) {
-                    isBusyRunAll = true
-                    runAllResult = await DiagnosticsRunner.runAllSteps(since: effectiveRange.start, until: effectiveRange.end)
-                    isBusyRunAll = false
+            Section {
+                Picker("Mode", selection: $mode) {
+                    ForEach(DiagnosticsMode.allCases) { m in
+                        Text(m.rawValue).tag(m)
+                    }
                 }
+                .pickerStyle(.segmented)
+            } footer: {
+                Text(mode == .runAll
+                     ? "Runs fetch → merge → format → dedupe → save in one tap for the range above. This is the same thing the automatic daily sync does."
+                     : "Runs each stage separately so you can inspect the output in between — useful for tracking down exactly where something's going wrong.")
             }
 
-            Section("Step 1: Fetch raw Google Fit data") {
-                actionRow("Fetch Raw", isBusy: isBusyFetch, result: fetchResult, monospace: true) {
-                    isBusyFetch = true
-                    fetchResult = await DiagnosticsRunner.fetchRaw(since: effectiveRange.start, until: effectiveRange.end)
-                    isBusyFetch = false
+            if mode == .runAll {
+                Section("Writes to Apple Health") {
+                    actionRow("Run All Steps", isBusy: isBusyRunAll, result: runAllResult, monospace: true) {
+                        isBusyRunAll = true
+                        runAllResult = await DiagnosticsRunner.runAllSteps(since: effectiveRange.start, until: effectiveRange.end)
+                        isBusyRunAll = false
+                    }
                 }
-            }
-
-            Section("Step 2: Merge into stage runs") {
-                actionRow("Merge Stages", isBusy: isBusyMerge, result: mergeResult, monospace: true) {
-                    isBusyMerge = true
-                    mergeResult = DiagnosticsRunner.mergeCached()
-                    isBusyMerge = false
+            } else {
+                Section("1. Fetch raw Google Fit data") {
+                    actionRow("Fetch Raw", isBusy: isBusyFetch, result: fetchResult, monospace: true) {
+                        isBusyFetch = true
+                        fetchResult = await DiagnosticsRunner.fetchRaw(since: effectiveRange.start, until: effectiveRange.end)
+                        isBusyFetch = false
+                    }
                 }
-            }
-
-            Section("Step 3: Format for Apple Health") {
-                actionRow("Format", isBusy: isBusyFormat, result: formatResult, monospace: true) {
-                    isBusyFormat = true
-                    formatResult = DiagnosticsRunner.formatCached()
-                    isBusyFormat = false
+                Section("2. Merge into stage runs") {
+                    actionRow("Merge Stages", isBusy: isBusyMerge, result: mergeResult, monospace: true) {
+                        isBusyMerge = true
+                        mergeResult = DiagnosticsRunner.mergeCached()
+                        isBusyMerge = false
+                    }
                 }
-            }
-
-            Section("Step 4: Check for duplicates") {
-                actionRow("Check Duplicates", isBusy: isBusyDedupe, result: dedupeResult) {
-                    isBusyDedupe = true
-                    dedupeResult = await DiagnosticsRunner.checkDuplicatesCached()
-                    isBusyDedupe = false
+                Section("3. Format for Apple Health") {
+                    actionRow("Format", isBusy: isBusyFormat, result: formatResult, monospace: true) {
+                        isBusyFormat = true
+                        formatResult = DiagnosticsRunner.formatCached()
+                        isBusyFormat = false
+                    }
                 }
-            }
-
-            Section("Step 5: Save to Apple Health") {
-                actionRow("Save to Apple Health", isBusy: isBusySave, result: saveResult) {
-                    isBusySave = true
-                    saveResult = await DiagnosticsRunner.saveCached()
-                    isBusySave = false
+                Section("4. Check for duplicates") {
+                    actionRow("Check Duplicates", isBusy: isBusyDedupe, result: dedupeResult) {
+                        isBusyDedupe = true
+                        dedupeResult = await DiagnosticsRunner.checkDuplicatesCached()
+                        isBusyDedupe = false
+                    }
+                }
+                Section("5. Save to Apple Health") {
+                    actionRow("Save to Apple Health", isBusy: isBusySave, result: saveResult) {
+                        isBusySave = true
+                        saveResult = await DiagnosticsRunner.saveCached()
+                        isBusySave = false
+                    }
                 }
             }
         }
@@ -158,6 +187,7 @@ struct DiagnosticsView: View {
             Button(isBusy ? "Running…" : title) {
                 Task { await action() }
             }
+            .buttonStyle(.borderedProminent)
             .disabled(isBusy)
 
             if !result.isEmpty {

@@ -66,9 +66,14 @@ struct DateRangeCalendarView: View {
             }
             .onEnded { _ in
                 dragAnchor = nil
-                // Enforce a 2-calendar-day minimum span.
+                // Enforce a 2-calendar-day minimum span, without pushing endDay
+                // into the future — pull startDay back a day instead if needed.
                 if calendar.dateComponents([.day], from: startDay, to: endDay).day ?? 0 < 1 {
-                    endDay = calendar.date(byAdding: .day, value: 1, to: startDay) ?? startDay
+                    if let extendedEnd = calendar.date(byAdding: .day, value: 1, to: startDay), extendedEnd <= maxSelectableDay {
+                        endDay = extendedEnd
+                    } else {
+                        startDay = calendar.date(byAdding: .day, value: -1, to: endDay) ?? startDay
+                    }
                 }
             }
     }
@@ -77,7 +82,13 @@ struct DateRangeCalendarView: View {
         let col = Int(location.x / cellWidth)
         let row = Int(location.y / rowHeight)
         guard row >= 0, row < rows.count, col >= 0, col < 7 else { return nil }
-        return rows[row][col]
+        guard let date = rows[row][col], date <= maxSelectableDay else { return nil }
+        return date
+    }
+
+    /// Today is the latest selectable day — sleep data for the future doesn't exist.
+    private var maxSelectableDay: Date {
+        calendar.startOfDay(for: Date())
     }
 
     // MARK: - Layout helpers
@@ -146,15 +157,24 @@ struct DateRangeCalendarView: View {
     private func dayCell(for date: Date?, width: CGFloat) -> some View {
         ZStack {
             if let date {
+                let isFuture = date > maxSelectableDay
                 let inRange = date >= calendar.startOfDay(for: startDay) && date <= calendar.startOfDay(for: endDay)
                 let isEndpoint = calendar.isDate(date, inSameDayAs: startDay) || calendar.isDate(date, inSameDayAs: endDay)
+                let isToday = calendar.isDateInToday(date)
 
-                Rectangle()
-                    .fill(isEndpoint ? Color.accentColor : (inRange ? Color.accentColor.opacity(0.25) : Color.clear))
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isEndpoint ? Color.accentColor : (inRange && !isFuture ? Color.accentColor.opacity(0.22) : Color.clear))
+                    .padding(2)
+
+                if isToday {
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(Color.accentColor, lineWidth: isEndpoint ? 0 : 1.5)
+                        .padding(2)
+                }
 
                 Text("\(calendar.component(.day, from: date))")
                     .font(.caption)
-                    .foregroundStyle(isEndpoint ? .white : .primary)
+                    .foregroundStyle(isFuture ? Color.secondary.opacity(0.35) : (isEndpoint ? .white : .primary))
             }
         }
         .frame(width: width, height: rowHeight)
