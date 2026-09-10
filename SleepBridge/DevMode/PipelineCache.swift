@@ -6,35 +6,40 @@ import Foundation
 /// which is intentional; this is a debugging aid, not durable storage.
 @MainActor
 enum PipelineCache {
-    static let maxAge: TimeInterval = 30 * 60 // 30 minutes
+  static let maxAge: TimeInterval = 30 * 60  // 30 minutes
 
-    static var rawResult: RawFetchResult?
-    static var rawFetchedAt: Date?
+  static var rawResult: RawFetchResult?
+  static var rawFetchedAt: Date?
 
-    static var mergedResult: MergedFetchResult?
-    static var mergedAt: Date?
+  static var mergedResult: MergedFetchResult?
+  static var mergedAt: Date?
 
-    static var formattedSessions: [FormattedSession]?
-    static var formattedAt: Date?
+  static var formattedSessions: [FormattedSession]?
+  static var formattedAt: Date?
 
-    static var dedupedSamples: [FormattedSample]?
-    static var skippedDuplicateCount: Int?
-    static var dedupedAt: Date?
+  /// Renamed from "deduped" — this now holds the output of `reconcile`, which
+  /// does version-aware stale-session replacement in addition to plain
+  /// exact-match dedupe, so "deduped" undersold what's actually in here.
+  static var reconciledSamples: [FormattedSample]?
+  static var skippedDuplicateCount: Int?
+  static var replacedSessionCount: Int?
+  static var reconciledAt: Date?
 
-    static func isFresh(_ date: Date?) -> Bool {
-        guard let date else { return false }
-        return Date().timeIntervalSince(date) < maxAge
-    }
+  static func isFresh(_ date: Date?) -> Bool {
+    guard let date else { return false }
+    return Date().timeIntervalSince(date) < maxAge
+  }
 
-    static func clear() {
-        rawResult = nil
-        rawFetchedAt = nil
-        mergedResult = nil
-        mergedAt = nil
-        formattedSessions = nil
-        formattedAt = nil
-        dedupedSamples = nil
-        skippedDuplicateCount = nil
-        dedupedAt = nil
-    }
+  static func clear() {
+    rawResult = nil
+    rawFetchedAt = nil
+    mergedResult = nil
+    mergedAt = nil
+    formattedSessions = nil
+    formattedAt = nil
+    reconciledSamples = nil
+    skippedDuplicateCount = nil
+    replacedSessionCount = nil
+    reconciledAt = nil
+  }
 }

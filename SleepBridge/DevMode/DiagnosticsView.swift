@@ -116,7 +116,7 @@ struct DiagnosticsView: View {
       } footer: {
         Text(
           mode == .runAll
-            ? "Runs fetch → merge → format → dedupe → save in one tap for the range above. This is the same thing the automatic daily sync does."
+            ? "Runs fetch → merge → format → reconcile → save in one tap for the range above. This is the same thing the automatic daily sync does. Sessions written under an older pipeline version are automatically detected and fully replaced."
             : "Runs each stage separately so you can inspect the output in between — useful for tracking down exactly where something's going wrong."
         )
       }
@@ -153,7 +153,7 @@ struct DiagnosticsView: View {
             isBusyFormat = false
           }
         }
-        Section("4. Check for duplicates") {
+        Section("4. Check for duplicates / stale versions") {
           actionRow("Check Duplicates", isBusy: isBusyDedupe, result: dedupeResult) {
             isBusyDedupe = true
             dedupeResult = await DiagnosticsRunner.checkDuplicatesCached()
