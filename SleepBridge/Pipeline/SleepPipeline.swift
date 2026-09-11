@@ -79,7 +79,7 @@ enum SleepPipeline {
 
   /// Stage 1: raw Google Fit data only, no formatting or mapping applied.
   static func fetchRaw(since: Date, until: Date = Date()) async throws -> RawFetchResult {
-    SyncRunner.log("Stage 1/5: fetching since \(since) until \(until)")
+    SyncRunner.log("Stage 1/5: fetching since \(since) until \(until)", divider: true)
 
     let client = GoogleFitClient()
     let sessions = try await client.listSleepSessions(since: since, until: until)

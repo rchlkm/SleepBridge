@@ -4,7 +4,9 @@ import UIKit
 
 /// Thin wrappers around SleepPipeline's stages, adding caching between steps
 /// and human-readable summaries for the diagnostics screen. The actual logic
-/// lives in SleepPipeline.swift — this file doesn't duplicate it.
+/// lives in SleepPipeline.swift — this file doesn't duplicate it. All
+/// multi-line output renders through PipelineDebugFormat so every stage
+/// looks the same regardless of which one produced it.
 @MainActor
 enum DiagnosticsRunner {
 
@@ -72,19 +74,7 @@ enum DiagnosticsRunner {
       guard !raw.sessions.isEmpty else {
         return "⚠️ No sleep sessions found in that range."
       }
-
-      var lines = [
-        "✅ \(raw.sessions.count) session(s) — raw Google Fit data (\(raw.sessions.reduce(0) { $0 + $1.points.count }) point(s) total):"
-      ]
-      for item in raw.sessions {
-        let start = Date(timeIntervalSince1970: Double(item.session.startTimeMillis) / 1000)
-        let end = Date(timeIntervalSince1970: Double(item.session.endTimeMillis) / 1000)
-        lines.append("Session \(start) → \(end):")
-        for point in item.points {
-          lines.append("  intVal=\(point.intVal)  \(point.start) → \(point.end)")
-        }
-      }
-      return copyAndReturn(lines.joined(separator: "\n"))
+      return copyAndReturn("✅ Fetched.\n\n" + PipelineDebugFormat.render(raw))
     } catch {
       return "❌ Fetch failed: \(error)"
     }
@@ -103,15 +93,7 @@ enum DiagnosticsRunner {
     guard !merged.sessions.isEmpty else {
       return "⚠️ Nothing to merge."
     }
-
-    var lines = ["✅ \(merged.sessions.count) session(s) merged:"]
-    for session in merged.sessions {
-      lines.append("Session (\(session.stages.count) merged stage(s)):")
-      for stage in session.stages {
-        lines.append("  intVal=\(stage.intVal)  \(stage.start) → \(stage.end)")
-      }
-    }
-    return copyAndReturn(lines.joined(separator: "\n"))
+    return copyAndReturn("✅ Merged.\n\n" + PipelineDebugFormat.render(merged))
   }
 
   static func formatCached() -> String {
@@ -124,7 +106,7 @@ enum DiagnosticsRunner {
     PipelineCache.formattedSessions = formattedSessions
     PipelineCache.formattedAt = Date()
 
-    return copyAndReturn(debugFormattedGrouped(formattedSessions))
+    return copyAndReturn("✅ Formatted.\n\n" + PipelineDebugFormat.render(formattedSessions))
   }
 
   /// Runs the version-aware reconcile stage:
@@ -143,13 +125,9 @@ enum DiagnosticsRunner {
       PipelineCache.skippedDuplicateCount = skipped
       PipelineCache.replacedSessionCount = replacedSessions
       PipelineCache.reconciledAt = Date()
-      var message =
-        "✅ \(toWrite.count) sample(s) to write, \(skipped) already exist and will be skipped."
-      if replacedSessions > 0 {
-        message +=
-          " \(replacedSessions) session(s) were stale (older pipeline version) and will be fully replaced."
-      }
-      return message
+      return "✅ "
+        + PipelineDebugFormat.reconcileSummary(
+          toWriteCount: toWrite.count, skipped: skipped, replacedSessions: replacedSessions)
     } catch {
       return "❌ Duplicate check failed: \(error)"
     }
@@ -166,12 +144,9 @@ enum DiagnosticsRunner {
       let skipped = PipelineCache.skippedDuplicateCount ?? 0
       let replaced = PipelineCache.replacedSessionCount ?? 0
       PipelineCache.clear()
-      var message =
-        "✅ Wrote \(written) sample(s) to Apple Health (\(skipped) duplicate(s) were skipped)."
-      if replaced > 0 {
-        message += " \(replaced) stale session(s) were replaced."
-      }
-      return message
+      return "✅ "
+        + PipelineDebugFormat.saveSummary(
+          written: written, skipped: skipped, replacedSessions: replaced)
     } catch {
       return "❌ Save failed: \(error)"
     }
@@ -179,18 +154,17 @@ enum DiagnosticsRunner {
 
   // MARK: - Run everything at once, for a manually picked range
 
-  /// Runs all five stages back to back for the given range
-  /// Writes to Apple Health (same as the automatic sync)
+  /// Runs all five stages back to back for the given range.
+  /// Writes to Apple Health (same as the automatic sync).
   static func runAllSteps(since: Date, until: Date) async -> String {
     do {
       let result = try await SleepPipeline.runAll(since: since, until: until)
-      var header =
-        "✅ Wrote \(result.written) new sample(s), skipped \(result.skipped) duplicate(s)."
-      if result.replacedSessions > 0 {
-        header += " \(result.replacedSessions) stale session(s) were replaced."
-      }
-      header += "\n"
-      return copyAndReturn(header + debugFormattedGrouped(result.formattedSessions))
+      let header =
+        "✅ "
+        + PipelineDebugFormat.saveSummary(
+          written: result.written, skipped: result.skipped,
+          replacedSessions: result.replacedSessions)
+      return copyAndReturn(header + "\n\n" + PipelineDebugFormat.render(result.formattedSessions))
     } catch {
       return "❌ Run failed: \(error)"
     }
@@ -202,48 +176,106 @@ enum DiagnosticsRunner {
     await DataExporter.exportRawData(since: since, until: until)
   }
 
-  // MARK: - Debug formatting
-
-  /// Purely for debugging — readable stage names and formatted dates instead of
-  /// raw Swift Date descriptions, grouped by session:
-  ///
-  /// =======
-  /// Session 05-02-2026 1:31:03 AM → 05-02-2026 10:23:39 AM
-  /// Asleep (Core/Light) 2:40:07 AM - 3:39:24 AM
-  static func debugFormattedGrouped(_ sessions: [FormattedSession]) -> String {
-    guard !sessions.isEmpty else {
-      return "⚠️ No formatted sessions."
-    }
-
-    let dateTimeFormatter = DateFormatter()
-    dateTimeFormatter.dateFormat = "MM-dd-yyyy h:mm:ss a"
-
-    let timeFormatter = DateFormatter()
-    timeFormatter.dateFormat = "h:mm:ss a"
-
-    var lines: [String] = []
-    for session in sessions {
-      lines.append("=======")
-      lines.append(
-        "Session \(dateTimeFormatter.string(from: session.sessionStart)) → \(dateTimeFormatter.string(from: session.sessionEnd))"
-      )
-      for inBed in session.inBedSpans {
-        lines.append(
-          "In Bed \(dateTimeFormatter.string(from: inBed.start)) → \(dateTimeFormatter.string(from: inBed.end))"
-        )
-      }
-      for stage in session.stages {
-        let stageName = SleepStageMapper.sleepStageName(stage.stage)
-        lines.append(
-          "\(stageName) \(timeFormatter.string(from: stage.start)) - \(timeFormatter.string(from: stage.end))"
-        )
-      }
-    }
-    return lines.joined(separator: "\n")
-  }
-
   private static func copyAndReturn(_ text: String) -> String {
     UIPasteboard.general.string = text
     return text
+  }
+
+  // MARK: - Unified stage list for the Diagnostics UI
+
+  enum PipelineStage: Int, CaseIterable, Identifiable {
+    case fetch, merge, format, reconcile, save
+    var id: Int { rawValue }
+
+    var title: String {
+      switch self {
+      case .fetch: return "Fetch Raw"
+      case .merge: return "Merge Stages"
+      case .format: return "Format"
+      case .reconcile: return "Check Duplicates"
+      case .save: return "Save to Apple Health"
+      }
+    }
+  }
+
+  enum StageStatus {
+    case notRun
+    case stale
+    case fresh(Date)
+  }
+
+  static func status(for stage: PipelineStage) -> StageStatus {
+    let date: Date?
+    let isFresh: Bool
+    switch stage {
+    case .fetch:
+      date = PipelineCache.rawFetchedAt
+      isFresh = PipelineCache.isFresh(date)
+    case .merge:
+      date = PipelineCache.mergedAt
+      isFresh = PipelineCache.isFresh(date)
+    case .format:
+      date = PipelineCache.formattedAt
+      isFresh = PipelineCache.isFresh(date)
+    case .reconcile:
+      date = PipelineCache.reconciledAt
+      isFresh = PipelineCache.isFresh(date)
+    case .save:
+      date = nil  // save clears the cache on success — never shown as "fresh"
+      isFresh = false
+    }
+    guard let date else { return .notRun }
+    return isFresh ? .fresh(date) : .stale
+  }
+
+  // Cascading runners: fill in whatever upstream cache is missing/stale,
+  // silently, so the UI never has to know the pipeline's internal ordering.
+
+  @discardableResult
+  private static func ensureFetch(since: Date, until: Date) async -> String {
+    if PipelineCache.isFresh(PipelineCache.rawFetchedAt) { return "(reused cached fetch)" }
+    return await fetchRaw(since: since, until: until)
+  }
+
+  @discardableResult
+  private static func ensureMerge(since: Date, until: Date) async -> String {
+    await ensureFetch(since: since, until: until)
+    if PipelineCache.isFresh(PipelineCache.mergedAt) { return "(reused cached merge)" }
+    return mergeCached()
+  }
+
+  @discardableResult
+  private static func ensureFormat(since: Date, until: Date) async -> String {
+    await ensureMerge(since: since, until: until)
+    if PipelineCache.isFresh(PipelineCache.formattedAt) { return "(reused cached format)" }
+    return formatCached()
+  }
+
+  @discardableResult
+  private static func ensureReconcile(since: Date, until: Date) async -> String {
+    await ensureFormat(since: since, until: until)
+    if PipelineCache.isFresh(PipelineCache.reconciledAt) { return "(reused cached reconcile)" }
+    return await checkDuplicatesCached()
+  }
+
+  /// Runs exactly the stages needed to produce `stage`'s output, reusing
+  /// fresh cache where possible.
+  static func run(_ stage: PipelineStage, since: Date, until: Date) async -> String {
+    switch stage {
+    case .fetch:
+      return await fetchRaw(since: since, until: until)  // explicit tap always re-fetches
+    case .merge:
+      await ensureFetch(since: since, until: until)
+      return mergeCached()
+    case .format:
+      await ensureMerge(since: since, until: until)
+      return formatCached()
+    case .reconcile:
+      await ensureFormat(since: since, until: until)
+      return await checkDuplicatesCached()
+    case .save:
+      await ensureReconcile(since: since, until: until)
+      return await saveCached()
+    }
   }
 }

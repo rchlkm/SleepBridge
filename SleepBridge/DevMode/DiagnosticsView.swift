@@ -1,14 +1,6 @@
 import SwiftUI
 
-private enum DiagnosticsMode: String, CaseIterable, Identifiable {
-  case runAll = "Run All"
-  case stepByStep = "Step by Step"
-  var id: String { rawValue }
-}
-
 struct DiagnosticsView: View {
-  @State private var mode: DiagnosticsMode = .runAll
-
   // Quick checks
   @State private var authResult = ""
   @State private var writeTestResult = ""
@@ -22,21 +14,11 @@ struct DiagnosticsView: View {
     Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
   @State private var rangeEndDay = Date()
 
-  // Step-by-step pipeline
-  @State private var fetchResult = ""
-  @State private var mergeResult = ""
-  @State private var formatResult = ""
-  @State private var dedupeResult = ""
-  @State private var saveResult = ""
-  @State private var isBusyFetch = false
-  @State private var isBusyMerge = false
-  @State private var isBusyFormat = false
-  @State private var isBusyDedupe = false
-  @State private var isBusySave = false
-
-  // Run all at once
-  @State private var runAllResult = ""
-  @State private var isBusyRunAll = false
+  // Pipeline stages
+  @State private var stageResults: [DiagnosticsRunner.PipelineStage: String] = [:]
+  @State private var busyStage: DiagnosticsRunner.PipelineStage?
+  @State private var expandedStage: DiagnosticsRunner.PipelineStage?
+  @State private var showSaveConfirm = false
 
   // Backup export
   @State private var exportResult = ""
@@ -93,9 +75,7 @@ struct DiagnosticsView: View {
           isBusyExport = false
         }
         if exportFileURL != nil {
-          Button("Share / Save File") {
-            showShareSheet = true
-          }
+          Button("Share / Save File") { showShareSheet = true }
         }
       } header: {
         Label("Backup", systemImage: "externaldrive.badge.icloud")
@@ -107,66 +87,15 @@ struct DiagnosticsView: View {
       .listRowBackground(Color.orange.opacity(0.12))
 
       Section {
-        Picker("Mode", selection: $mode) {
-          ForEach(DiagnosticsMode.allCases) { m in
-            Text(m.rawValue).tag(m)
-          }
+        ForEach(DiagnosticsRunner.PipelineStage.allCases) { stage in
+          stageRow(stage)
         }
-        .pickerStyle(.segmented)
+      } header: {
+        Text("Pipeline")
       } footer: {
         Text(
-          mode == .runAll
-            ? "Runs fetch → merge → format → reconcile → save in one tap for the range above. This is the same thing the automatic daily sync does. Sessions written under an older pipeline version are automatically detected and fully replaced."
-            : "Runs each stage separately so you can inspect the output in between — useful for tracking down exactly where something's going wrong."
+          "Tap any stage to run it — earlier stages run automatically first if their cache is stale, using cached results where still fresh. \"Save\" is the only stage that writes to Apple Health."
         )
-      }
-
-      if mode == .runAll {
-        Section("Writes to Apple Health") {
-          actionRow("Run All Steps", isBusy: isBusyRunAll, result: runAllResult, monospace: true) {
-            isBusyRunAll = true
-            runAllResult = await DiagnosticsRunner.runAllSteps(
-              since: effectiveRange.start, until: effectiveRange.end)
-            isBusyRunAll = false
-          }
-        }
-      } else {
-        Section("1. Fetch raw Google Fit data") {
-          actionRow("Fetch Raw", isBusy: isBusyFetch, result: fetchResult, monospace: true) {
-            isBusyFetch = true
-            fetchResult = await DiagnosticsRunner.fetchRaw(
-              since: effectiveRange.start, until: effectiveRange.end)
-            isBusyFetch = false
-          }
-        }
-        Section("2. Merge into stage runs") {
-          actionRow("Merge Stages", isBusy: isBusyMerge, result: mergeResult, monospace: true) {
-            isBusyMerge = true
-            mergeResult = DiagnosticsRunner.mergeCached()
-            isBusyMerge = false
-          }
-        }
-        Section("3. Format for Apple Health") {
-          actionRow("Format", isBusy: isBusyFormat, result: formatResult, monospace: true) {
-            isBusyFormat = true
-            formatResult = DiagnosticsRunner.formatCached()
-            isBusyFormat = false
-          }
-        }
-        Section("4. Check for duplicates / stale versions") {
-          actionRow("Check Duplicates", isBusy: isBusyDedupe, result: dedupeResult) {
-            isBusyDedupe = true
-            dedupeResult = await DiagnosticsRunner.checkDuplicatesCached()
-            isBusyDedupe = false
-          }
-        }
-        Section("5. Save to Apple Health") {
-          actionRow("Save to Apple Health", isBusy: isBusySave, result: saveResult) {
-            isBusySave = true
-            saveResult = await DiagnosticsRunner.saveCached()
-            isBusySave = false
-          }
-        }
       }
     }
     .navigationTitle("Diagnostics")
@@ -175,17 +104,99 @@ struct DiagnosticsView: View {
         ShareSheet(items: [url])
       }
     }
+    .alert("Write to Apple Health?", isPresented: $showSaveConfirm) {
+      Button("Cancel", role: .cancel) {}
+      Button("Save", role: .destructive) {
+        Task { await runStage(.save) }
+      }
+    } message: {
+      Text(
+        "This runs any needed prior stages, then writes new samples to Apple Health for the selected range."
+      )
+    }
   }
 
-  /// Converts the calendar-day-only picker selection into an actual noon-to-noon
-  /// Date range — a night of sleep straddles midnight, so noon-to-noon lines up
-  /// with "one night" better than midnight-to-midnight would.
   private var effectiveRange: (start: Date, end: Date) {
     let calendar = Calendar.current
     let start =
       calendar.date(bySettingHour: 12, minute: 0, second: 0, of: rangeStartDay) ?? rangeStartDay
     let end = calendar.date(bySettingHour: 12, minute: 0, second: 0, of: rangeEndDay) ?? rangeEndDay
     return (start, end)
+  }
+
+  @ViewBuilder
+  private func stageRow(_ stage: DiagnosticsRunner.PipelineStage) -> some View {
+    let isBusy = busyStage == stage
+    VStack(alignment: .leading, spacing: 6) {
+      HStack {
+        Button {
+          if stage == .save {
+            showSaveConfirm = true
+          } else {
+            Task { await runStage(stage) }
+          }
+        } label: {
+          HStack {
+            Text(stage.title)
+            Spacer()
+            statusBadge(for: stage)
+          }
+        }
+        .disabled(busyStage != nil)
+      }
+
+      if isBusy {
+        ProgressView().frame(maxWidth: .infinity, alignment: .leading)
+      } else if let result = stageResults[stage] {
+        DisclosureGroup(
+          isExpanded: Binding(
+            get: { expandedStage == stage },
+            set: { expandedStage = $0 ? stage : nil }
+          )
+        ) {
+          CopyableOutputView(text: result, monospace: true, maxHeight: 220)
+        } label: {
+          Text("Output")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      }
+    }
+  }
+
+  @ViewBuilder
+  private func statusBadge(for stage: DiagnosticsRunner.PipelineStage) -> some View {
+    switch DiagnosticsRunner.status(for: stage) {
+    case .notRun:
+      badge("Not run", color: .secondary)
+    case .stale:
+      badge("Stale", color: .orange)
+    case .fresh(let date):
+      badge("Fresh · \(relativeMinutes(date))", color: .green)
+    }
+  }
+
+  private func badge(_ text: String, color: Color) -> some View {
+    Text(text)
+      .font(.caption2.weight(.medium))
+      .foregroundStyle(color)
+      .padding(.horizontal, 6)
+      .padding(.vertical, 2)
+      .background(color.opacity(0.15), in: Capsule())
+  }
+
+  private func relativeMinutes(_ date: Date) -> String {
+    let minutes = max(0, Int(Date().timeIntervalSince(date) / 60))
+    return minutes == 0 ? "just now" : "\(minutes)m ago"
+  }
+
+  private func runStage(_ stage: DiagnosticsRunner.PipelineStage) async {
+    busyStage = stage
+    let result = await DiagnosticsRunner.run(
+      stage, since: effectiveRange.start, until: effectiveRange.end)
+    stageResults[stage] = result
+    expandedStage = stage
+    busyStage = nil
   }
 
   @ViewBuilder
