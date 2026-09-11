@@ -225,8 +225,13 @@ enum DiagnosticsRunner {
     for session in sessions {
       lines.append("=======")
       lines.append(
-        "Session \(dateTimeFormatter.string(from: session.inBed.start)) → \(dateTimeFormatter.string(from: session.inBed.end))"
+        "Session \(dateTimeFormatter.string(from: session.sessionStart)) → \(dateTimeFormatter.string(from: session.sessionEnd))"
       )
+      for inBed in session.inBedSpans {
+        lines.append(
+          "In Bed \(dateTimeFormatter.string(from: inBed.start)) → \(dateTimeFormatter.string(from: inBed.end))"
+        )
+      }
       for stage in session.stages {
         let stageName = SleepStageMapper.sleepStageName(stage.stage)
         lines.append(

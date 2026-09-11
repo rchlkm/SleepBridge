@@ -1,3 +1,4 @@
+// SleepBridge/Pipeline/SleepPipeline.swift
 import Foundation
 import HealthKit
 
@@ -37,7 +38,7 @@ struct FormattedSample {
   let start: Date
   let end: Date
   let stage: HKCategoryValueSleepAnalysis
-  /// The original Google Fit intVal this came from, nil for the synthesized
+  /// The original Google Fit intVal this came from, nil for a synthesized
   /// in-bed span (which Google Fit doesn't track as its own concept).
   let sourceIntVal: Int?
 }
@@ -45,13 +46,23 @@ struct FormattedSample {
 /// One formatted session, keeping the in-bed envelope and its stage samples
 /// grouped explicitly — rather than flattened into one list and re-inferred
 /// later by scanning for `.inBed` markers, which breaks if dedupe ever filters
-/// the envelope sample out while keeping its stages (or vice versa).
+/// an envelope sample out while keeping its stages (or vice versa).
+///
+/// `inBedSpans` may contain more than one sample: if Nest Hub reported an
+/// out-of-bed period in the middle of the night, HealthKit's model for that
+/// isn't a stage value — it's a gap in the `.inBed` envelope itself (the same
+/// way Apple Watch produces two separate `.inBed` samples if you take it off
+/// mid-sleep). `sessionStart`/`sessionEnd` are the original Nest Hub session
+/// bounds, kept explicitly so downstream logic doesn't have to re-derive them
+/// from spans that may now have gaps at the very start or end.
 struct FormattedSession {
-  let inBed: FormattedSample
+  let sessionStart: Date
+  let sessionEnd: Date
+  let inBedSpans: [FormattedSample]
   let stages: [FormattedSample]
 
-  /// All samples in this session, envelope first — the shape dedupe/save need.
-  var allSamples: [FormattedSample] { [inBed] + stages }
+  /// All samples in this session, envelope span(s) first
+  var allSamples: [FormattedSample] { inBedSpans + stages }
 }
 
 /// Result of running all five stages back to back with no pausing for review.
@@ -64,10 +75,12 @@ struct PipelineRunResult {
 }
 
 enum SleepPipeline {
-  static let pipelineVersion = 1
+  static let pipelineVersion = 2
 
   /// Stage 1: raw Google Fit data only, no formatting or mapping applied.
   static func fetchRaw(since: Date, until: Date = Date()) async throws -> RawFetchResult {
+    SyncRunner.log("Stage 1/5: fetching since \(since) until \(until)")
+
     let client = GoogleFitClient()
     let sessions = try await client.listSleepSessions(since: since, until: until)
 
@@ -90,6 +103,8 @@ enum SleepPipeline {
   /// two same-value points, that's kept as two separate stages rather than
   /// papering over unknown/missing minutes as one continuous span.
   static func mergeStages(_ raw: RawFetchResult) -> MergedFetchResult {
+    SyncRunner.log("Stage 2/5: merging \(raw.sessions.count) raw stages")
+
     let mergedSessions = raw.sessions.map { item -> MergedSession in
       let sortedPoints = item.points.sorted { $0.start < $1.start }
       var stages: [MergedSleepStage] = []
@@ -112,21 +127,61 @@ enum SleepPipeline {
   /// Returns one FormattedSession per merged session — grouping preserved
   /// explicitly, not flattened.
   static func format(_ merged: MergedFetchResult) -> [FormattedSession] {
-    merged.sessions.map { item -> FormattedSession in
+    SyncRunner.log("Stage 3/5: formatting \(merged.sessions.count) merged stages")
+
+    return merged.sessions.map { item -> FormattedSession in
       let sessionStart = Date(timeIntervalSince1970: Double(item.session.startTimeMillis) / 1000)
       let sessionEnd = Date(timeIntervalSince1970: Double(item.session.endTimeMillis) / 1000)
-      // HealthKit benefits from an overall in-bed envelope; Google Fit does not emit one.
-      let inBed = FormattedSample(
-        start: sessionStart, end: sessionEnd, stage: .inBed, sourceIntVal: nil)
+
+      // intVal == 3 means "out of bed" — physically left the bed, distinct from
+      // intVal == 1 ("awake", still in bed)
+      // HealthKit has no stage value for this;
+      // the correct representation is a *gap* in the `.inBed` envelope,
+      // not a continuous inBed span that ignores what Nest Hub reported.
+      let outOfBedWindows = item.stages
+        .filter { $0.intVal == 3 }
+        .sorted { $0.start < $1.start }
+
+      let inBedSpans = splitInBedSpans(
+        sessionStart: sessionStart, sessionEnd: sessionEnd, excluding: outOfBedWindows
+      ).map { FormattedSample(start: $0.start, end: $0.end, stage: .inBed, sourceIntVal: nil) }
 
       let stages: [FormattedSample] = item.stages.compactMap { stage in
-        // Unsupported Google values (such as out-of-bed) are deliberately omitted.
+        // Unsupported Google values (out-of-bed, and anything unrecognized)
+        // are deliberately omitted from the detailed stage timeline.
         guard let mapped = SleepStageMapper.map(stage.intVal) else { return nil }
         return FormattedSample(
           start: stage.start, end: stage.end, stage: mapped, sourceIntVal: stage.intVal)
       }
-      return FormattedSession(inBed: inBed, stages: stages)
+      return FormattedSession(
+        sessionStart: sessionStart, sessionEnd: sessionEnd, inBedSpans: inBedSpans, stages: stages)
     }
+  }
+
+  /// Subtracts out-of-bed windows from the session range, returning the
+  /// remaining continuous "actually in bed" intervals in chronological order.
+  /// With no out-of-bed windows, this is just the whole session range — one
+  /// `.inBed` span, matching prior behavior exactly.
+  private static func splitInBedSpans(
+    sessionStart: Date, sessionEnd: Date, excluding outOfBed: [MergedSleepStage]
+  ) -> [(start: Date, end: Date)] {
+    guard !outOfBed.isEmpty else { return [(sessionStart, sessionEnd)] }
+
+    var spans: [(start: Date, end: Date)] = []
+    var cursor = sessionStart
+    for window in outOfBed {
+      let clampedStart = max(window.start, sessionStart)
+      let clampedEnd = min(window.end, sessionEnd)
+      guard clampedStart < clampedEnd else { continue }
+      if clampedStart > cursor {
+        spans.append((cursor, clampedStart))
+      }
+      cursor = max(cursor, clampedEnd)
+    }
+    if cursor < sessionEnd {
+      spans.append((cursor, sessionEnd))
+    }
+    return spans
   }
 
   /// Stage 4 (plain path): checks each formatted sample against what's already
@@ -139,6 +194,8 @@ enum SleepPipeline {
   static func dedupe(_ samples: [FormattedSample]) async throws -> (
     toWrite: [FormattedSample], skipped: Int
   ) {
+    SyncRunner.log("Stage 4/5: dedupeing \(samples.count) formatted sessions")
+
     guard let earliestStart = samples.map(\.start).min(), let latestEnd = samples.map(\.end).max()
     else {
       return ([], 0)
@@ -170,18 +227,38 @@ enum SleepPipeline {
     return (toWrite, skipped)
   }
 
+  /// Tolerance for deciding whether an existing sample belongs to a session's
+  /// range. Separate from (and in addition to) `datesMatch`'s per-sample exact
+  /// match: this one exists because a session's own start/end (from Google's
+  /// `sessions.list`) and its segment data (from `dataset:aggregate`) are two
+  /// separate API responses and aren't guaranteed to agree to the same
+  /// millisecond — which specifically bites the leading/trailing Awake
+  /// intervals, since those sit right at the session boundary by definition.
+  private static let sessionBoundaryTolerance: TimeInterval = 2
+
+  private static func withinSession(_ date: Date, start: Date, end: Date) -> Bool {
+    date >= start.addingTimeInterval(-sessionBoundaryTolerance)
+      && date <= end.addingTimeInterval(sessionBoundaryTolerance)
+  }
+
   /// Stage 4 (default path): version-aware replacement for plain dedupe.
-  /// Reads the pipelineVersion tag off each session's *in-bed* sample only —
-  /// every stage sample inside that session's window was necessarily written
-  /// by the same pipeline run, so one tag per session is enough to know the
-  /// whole session is stale (see HealthKitWriter.pipelineVersionMetadataKey).
-  /// If a session is stale, its old in-bed sample and every old stage sample
-  /// within its span are deleted, and the whole session is rewritten
-  /// unconditionally. If a session is current, its samples go through ordinary
-  /// exact-match dedupe so a routine resync with no logic changes stays cheap.
+  /// Reads the pipelineVersion tag off any existing `.inBed` sample belonging
+  /// to this session — every stage sample inside the session's window was
+  /// necessarily written by the same pipeline run, so one tag is enough to
+  /// know the whole session is stale (see
+  /// HealthKitWriter.pipelineVersionMetadataKey). A session may now have more
+  /// than one `.inBed` sample (see FormattedSession.inBedSpans), so staleness
+  /// and replacement are evaluated over the session's full `sessionStart...
+  /// sessionEnd` range rather than against a single envelope sample's exact
+  /// bounds. If a session is stale, every old in-bed and stage sample within
+  /// its range is deleted and the whole session is rewritten unconditionally.
+  /// If a session is current, its samples go through ordinary exact-match
+  /// dedupe so a routine resync with no logic changes stays cheap.
   static func reconcile(_ sessions: [FormattedSession]) async throws -> (
     toWrite: [FormattedSample], skipped: Int, replacedSessions: Int
   ) {
+    SyncRunner.log("Stage 4/5: reconciling \(sessions.count) formatted sessions")
+
     let flatSamples = sessions.flatMap(\.allSamples)
     guard let earliestStart = flatSamples.map(\.start).min(),
       let latestEnd = flatSamples.map(\.end).max()
@@ -203,27 +280,36 @@ enum SleepPipeline {
     var replacedSessions = 0
 
     for session in sessions {
-      let matchingInBed = existingInBed.first {
-        datesMatch($0.startDate, session.inBed.start) && datesMatch($0.endDate, session.inBed.end)
+      let matchingInBed = existingInBed.filter {
+        withinSession($0.startDate, start: session.sessionStart, end: session.sessionEnd)
+          && withinSession($0.endDate, start: session.sessionStart, end: session.sessionEnd)
       }
 
       let isStale: Bool
-      if let matchingInBed {
-        let version = matchingInBed.metadata?[HealthKitWriter.pipelineVersionMetadataKey] as? Int
-        isStale = version == nil || version! < pipelineVersion
+      if !matchingInBed.isEmpty {
+        isStale = matchingInBed.contains { sample in
+          let version = sample.metadata?[HealthKitWriter.pipelineVersionMetadataKey] as? Int
+          return version == nil || version! < pipelineVersion
+        }
       } else {
-        isStale = false  // no prior record for this session at all — new, not stale
+        isStale = false
       }
 
-      if isStale, let matchingInBed {
-        toDelete.append(matchingInBed)
+      if isStale {
+        toDelete.append(
+          contentsOf: existingInBed.filter {
+            withinSession($0.startDate, start: session.sessionStart, end: session.sessionEnd)
+              && withinSession($0.endDate, start: session.sessionStart, end: session.sessionEnd)
+          })
         toDelete.append(
           contentsOf: existingStages.filter {
-            $0.startDate >= session.inBed.start && $0.endDate <= session.inBed.end
+            withinSession($0.startDate, start: session.sessionStart, end: session.sessionEnd)
+              && withinSession($0.endDate, start: session.sessionStart, end: session.sessionEnd)
           })
         toWrite.append(contentsOf: session.allSamples)
         replacedSessions += 1
       } else {
+        // per-sample exact-match dedupe only happens here
         for sample in session.allSamples {
           let pool = sample.stage == .inBed ? existingInBed : existingStages
           let alreadyExists = pool.contains { e in
@@ -275,10 +361,13 @@ enum SleepPipeline {
   }
 
   /// Stage 5: writes the given samples to HealthKit. Assumes reconcile/dedupe
-  /// already ran. Attaches the pipelineVersion tag only to `.inBed` envelope
-  /// samples — see HealthKitWriter.pipelineVersionMetadataKey for why one tag
-  /// per session is sufficient and per-stage tagging would be wasteful.
+  /// already ran. Attaches the pipelineVersion tag only to `.inBed` samples
+  /// (there may be more than one per session now — see inBedSpans) — see
+  /// HealthKitWriter.pipelineVersionMetadataKey for why in-bed tagging is
+  /// sufficient and per-stage tagging would be wasteful.
   static func save(_ samples: [FormattedSample]) async throws -> Int {
+    SyncRunner.log("Stage 5/5: saving \(samples.count) samples to Apple Health")
+
     let writer = HealthKitWriter()
     try await writer.requestAuthorization()
     for sample in samples {
@@ -302,7 +391,7 @@ enum SleepPipeline {
   /// manual replace step needed for the common "I changed the mapping logic"
   /// case. `forceReplace` is a manual override for cases that isn't
   /// version-related — not currently exposed in the UI.
-  static func .(since: Date, until: Date = Date(), forceReplace: Bool = false) async throws
+  static func runAll(since: Date, until: Date = Date(), forceReplace: Bool = false) async throws
     -> PipelineRunResult
   {
     let raw = try await fetchRaw(since: since, until: until)
